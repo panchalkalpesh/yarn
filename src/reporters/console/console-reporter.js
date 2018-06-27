@@ -22,6 +22,7 @@ import inquirer from 'inquirer';
 const {inspect} = require('util');
 const readline = require('readline');
 const chalk = require('chalk');
+const stripAnsi = require('strip-ansi');
 const read = require('read');
 const tty = require('tty');
 
@@ -29,8 +30,8 @@ type Row = Array<string>;
 type InquirerResponses<K, T> = {[key: K]: Array<T>};
 
 // fixes bold on windows
-if (process.platform === 'win32' && process.env.TERM && !/^xterm/i.test(process.env.TERM)) {
-  chalk.styles.bold.close += '\u001b[m';
+if (process.platform === 'win32' && !(process.env.TERM && /^xterm/i.test(process.env.TERM))) {
+  chalk.bold._styles[0].close += '\u001b[m';
 }
 
 export default class ConsoleReporter extends BaseReporter {
@@ -40,6 +41,7 @@ export default class ConsoleReporter extends BaseReporter {
     this._lastCategorySize = 0;
     this._spinners = new Set();
     this.format = (chalk: any);
+    this.format.stripColor = stripAnsi;
     this.isSilent = !!opts.isSilent;
   }
 
@@ -228,7 +230,11 @@ export default class ConsoleReporter extends BaseReporter {
   }
   // handles basic tree output to console
   tree(key: string, trees: Trees) {
+    this.stopProgress();
     //
+    if (this.isSilent) {
+      return;
+    }
     const output = ({name, children, hint, color}, titlePrefix, childrenPrefix) => {
       const formatter = this.format;
       const out = getFormattedOutput({
@@ -409,7 +415,7 @@ export default class ConsoleReporter extends BaseReporter {
       };
     }
 
-    // Clear any potentiall old progress bars
+    // Clear any potentially old progress bars
     this.stopProgress();
 
     const bar = (this._progressBar = new Progress(count, this.stderr, (progress: Progress) => {

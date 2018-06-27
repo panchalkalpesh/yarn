@@ -171,6 +171,28 @@ test('TarballFetcher.fetch throws on invalid hash', async () => {
   expect(readdirSync(path.join(offlineMirrorDir))).toEqual([]);
 });
 
+test('TarballFetcher.fetch fixes hash if updateChecksums flag is true', async () => {
+  const wrongHash = 'foo';
+  const dir = await mkdir(`tarball-fetcher-${wrongHash}`);
+  const config = await Config.create({}, new Reporter());
+  config.updateChecksums = true;
+  const url = 'https://github.com/sindresorhus/beeper/archive/master.tar.gz';
+  const fetcher = new TarballFetcher(
+    dir,
+    {
+      type: 'tarball',
+      hash: wrongHash,
+      reference: url,
+      registry: 'npm',
+    },
+    config,
+  );
+  await fetcher.fetch();
+  const dirWithProperHash = dir.replace(wrongHash, fetcher.hash);
+  const name = (await fs.readJson(path.join(dirWithProperHash, 'package.json'))).name;
+  expect(name).toBe('beeper');
+});
+
 test('TarballFetcher.fetch supports local ungzipped tarball', async () => {
   const dir = await mkdir('tarball-fetcher');
   const fetcher = new LocalTarballFetcher(
@@ -232,4 +254,86 @@ test('TarballFetcher.fetch properly stores tarball of scoped package in offline 
   await fetcher.fetch();
   const exists = await fs.exists(path.join(offlineMirrorDir, '@exponent-configurator-1.0.2.tgz'));
   expect(exists).toBe(true);
+});
+
+test('TarballFetcher.fetch properly stores tarball for scoped package resolved from artifactory registry', async () => {
+  const dir = await mkdir('tarball-fetcher');
+  const offlineMirrorDir = await mkdir('offline-mirror');
+
+  const config = await Config.create();
+  config.registries.npm.config['yarn-offline-mirror'] = offlineMirrorDir;
+
+  const fetcher = new TarballFetcher(
+    dir,
+    {
+      type: 'tarball',
+      hash: '6f0ab73cdd7b82d8e81e80838b49e9e4c7fbcc44',
+      reference:
+        'https://artifactory.internal.site:443/artifactory/api/npm/external-mirror/@exponent/configurator/-/configurator-1.0.2.tgz',
+      registry: 'npm',
+    },
+    config,
+  );
+
+  expect(fetcher.getTarballMirrorPath()).toBe(path.join(offlineMirrorDir, '@exponent-configurator-1.0.2.tgz'));
+});
+
+test('TarballFetcher.fetch properly stores tarball for scoped package resolved from new  style URLs', async () => {
+  const dir = await mkdir('tarball-fetcher');
+  const offlineMirrorDir = await mkdir('offline-mirror');
+
+  const config = await Config.create();
+  config.registries.npm.config['yarn-offline-mirror'] = offlineMirrorDir;
+
+  const fetcher = new TarballFetcher(
+    dir,
+    {
+      type: 'tarball',
+      hash: '6f0ab73cdd7b82d8e81e80838b49e9e4c7fbcc44',
+      reference:
+        'https://artifactory.internal.site:443/artifactory/api/npm/external-mirror/@exponent/configurator/-/@exponent/configurator-1.0.2.tgz',
+      registry: 'npm',
+    },
+    config,
+  );
+
+  expect(fetcher.getTarballMirrorPath()).toBe(path.join(offlineMirrorDir, '@exponent-configurator-1.0.2.tgz'));
+});
+
+test('TarballFetcher.fetch throws on truncated tar data', async () => {
+  const dir = await mkdir('tarball-fetcher');
+  const reporter = new Reporter();
+  const fetcher = new TarballFetcher(
+    dir,
+    {
+      type: 'tarball',
+      hash: '5b0482e1cc75d37dfc7f6e6d663d08c96442dcd5',
+      reference: 'file:' + path.join(__dirname, 'fixtures', 'fetchers', 'tarball', 'broken-tar-data.tgz'),
+      registry: 'npm',
+    },
+    await Config.create({}, reporter),
+  );
+  await expect(fetcher.fetch()).rejects.toThrow(
+    // The "." in ".tgz" should be escaped, but that doesn't work with reporter.lang
+    new RegExp(reporter.lang('errorExtractingTarball', '.*', '.*broken-tar-data.tgz')),
+  );
+});
+
+test('TarballFetcher.fetch throws on truncated tar header', async () => {
+  const dir = await mkdir('tarball-fetcher');
+  const reporter = new Reporter();
+  const fetcher = new TarballFetcher(
+    dir,
+    {
+      type: 'tarball',
+      hash: '1d403a8c7ef4ce25b1e7b188ede272a42ce49a52',
+      reference: 'file:' + path.join(__dirname, 'fixtures', 'fetchers', 'tarball', 'broken-tar-header.tgz'),
+      registry: 'npm',
+    },
+    await Config.create({}, reporter),
+  );
+  await expect(fetcher.fetch()).rejects.toThrow(
+    // The "." in ".tgz" should be escaped, but that doesn't work with reporter.lang
+    new RegExp(reporter.lang('errorExtractingTarball', '.*', '.*broken-tar-header.tgz')),
+  );
 });

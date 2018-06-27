@@ -32,14 +32,16 @@ async function execCommand(
   const cacheDir = path.join(workingDir, '.yarn-cache');
 
   return new Promise((resolve, reject) => {
+    const cleanedEnv = {...process.env};
+    cleanedEnv['YARN_SILENT'] = 0;
+    cleanedEnv['YARN_WRAP_OUTPUT'] = 1;
+    delete cleanedEnv['FORCE_COLOR'];
+
     exec(
       `node "${yarnBin}" --cache-folder="${cacheDir}" ${cmd} ${args.join(' ')}`,
       {
         cwd: workingDir,
-        env: {
-          ...process.env,
-          YARN_SILENT: 0,
-        },
+        env: cleanedEnv,
       },
       (error, stdout) => {
         if (error) {
@@ -58,20 +60,8 @@ async function execCommand(
   });
 }
 
-function expectAddSuccessfullOutput(stdout, pkg) {
-  const lastLines = stdout.slice(stdout.length - 4);
-  expect(lastLines[0]).toEqual('success Saved lockfile.');
-  expect(lastLines[1]).toEqual('success Saved 1 new dependency.');
-  expect(lastLines[2]).toContain(pkg);
-  expect(lastLines[3]).toContain('Done');
-}
-
-function expectAddSuccessfullOutputWithNoLockFile(stdout, pkg) {
-  const lastLines = stdout.slice(stdout.length - 4);
-  expect(lastLines[0]).not.toEqual('success Saved lockfile.');
-  expect(lastLines[1]).toEqual('success Saved 1 new dependency.');
-  expect(lastLines[2]).toContain(pkg);
-  expect(lastLines[3]).toContain('Done');
+function expectAddOutput(stdout) {
+  expect(stdout.slice(1, stdout.length - 1)).toMatchSnapshot();
 }
 
 function expectRunOutput(stdout) {
@@ -99,7 +89,7 @@ function expectAnErrorMessage(command: Promise<Array<?string>>, expectedMessage:
     .then(function() {
       throw new Error('the command did not fail');
     })
-    .catch(error => expect(error.message).toContain(expectedMessage));
+    .catch(error => expect(error.message.replace(/\\/g, '')).toContain(expectedMessage));
 }
 
 function expectAnInfoMessageAfterError(command: Promise<Array<?string>>, expectedInfo: string): Promise<void> {
@@ -110,29 +100,29 @@ function expectAnInfoMessageAfterError(command: Promise<Array<?string>>, expecte
     .catch(error => expect(error.stdout).toContain(expectedInfo));
 }
 
-test.concurrent('should add package', async () => {
-  const stdout = await execCommand('add', ['left-pad'], 'run-add', true);
-  expectAddSuccessfullOutput(stdout, 'left-pad');
+test('should add package', async () => {
+  const stdout = await execCommand('add', ['left-pad@1.2.0'], 'run-add', true);
+  expectAddOutput(stdout);
 });
 
-test.concurrent('should add package with no-lockfile option', async () => {
-  const stdout = await execCommand('add', ['repeating', '--no-lockfile'], 'run-add-option', true);
-  expectAddSuccessfullOutputWithNoLockFile(stdout, 'repeating');
+test('should add package with no-lockfile option', async () => {
+  const stdout = await execCommand('add', ['repeating@3.0.0', '--no-lockfile'], 'run-add-option', true);
+  expectAddOutput(stdout);
 });
 
-test.concurrent('should add package with frozzen-lockfile option', async () => {
-  const stdout = await execCommand('add', ['repeating', '--frozen-lockfile'], 'run-add-option', true);
-  expectAddSuccessfullOutputWithNoLockFile(stdout, 'repeating');
+test('should add package with frozen-lockfile option', async () => {
+  const stdout = await execCommand('add', ['repeating@3.0.0', '--frozen-lockfile'], 'run-add-option', true);
+  expectAddOutput(stdout);
 });
 
-test.concurrent('should add package with no-lockfile option in front', async () => {
-  const stdout = await execCommand('add', ['--no-lockfile', 'split-lines'], 'run-add-option-in-front', true);
-  expectAddSuccessfullOutputWithNoLockFile(stdout, 'split-lines');
+test('should add package with no-lockfile option in front', async () => {
+  const stdout = await execCommand('add', ['--no-lockfile', 'split-lines@1.1.0'], 'run-add-option-in-front', true);
+  expectAddOutput(stdout);
 });
 
-test.concurrent('should add lockfile package', async () => {
-  const stdout = await execCommand('add', ['lockfile'], 'run-add-lockfile', true);
-  expectAddSuccessfullOutput(stdout, 'lockfile');
+test('should add lockfile package', async () => {
+  const stdout = await execCommand('add', ['lockfile@1.0.3'], 'run-add-lockfile', true);
+  expectAddOutput(stdout);
 });
 
 // test is failing on Node 4, https://travis-ci.org/yarnpkg/yarn/jobs/216254539
@@ -140,7 +130,7 @@ if (semver.satisfies(ver, '>=5.0.0')) {
   test.concurrent('should add progress package globally', async () => {
     const stdout = await execCommand(
       'global',
-      ['add', 'progress', '--global-folder', './global'],
+      ['add', 'progress@2.0.0', '--global-folder', './global'],
       'run-add-progress-globally',
       true,
     );
@@ -206,7 +196,8 @@ test.concurrent('should show version of yarn with -v', async () => {
 });
 
 test.concurrent('should run version command', async () => {
-  await expectAnErrorMessage(execCommand('version', [], 'run-version'), "Can't answer a question unless a user TTY");
+  const stdout = await execCommand('version', [], 'run-version');
+  expect(stdout[0]).toEqual(`yarn version v${pkg.version}`);
 });
 
 test.concurrent('should run --version command', async () => {
@@ -234,7 +225,7 @@ test.concurrent('should install if no args', async () => {
 
 test.concurrent('should install if first arg looks like a flag', async () => {
   const stdout = await execCommand('--json', [], 'run-add', true);
-  expect(stdout[stdout.length - 1]).toEqual('{"type":"info","data":"Lockfile not saved, no dependencies."}');
+  expect(stdout[stdout.length - 1]).toEqual('{"type":"success","data":"Saved lockfile."}');
 });
 
 test.concurrent('should not output JSON activity/progress if given --no-progress option', async () => {
@@ -322,4 +313,14 @@ test.concurrent('should run help for camelised command', async () => {
   expect(lastLines[1]).toMatch(/yarn generate-lock-entry --use-manifest .\/package.json/);
   expect(lastLines[2]).toMatch(/yarn generate-lock-entry --resolved local-file.tgz#hash/);
   expect(lastLines[3]).toMatch(/Visit https:\/\/yarnpkg.com\/en\/docs\/cli\/generate-lock-entry/);
+});
+
+// regression test for #5496
+// this fixture has a .yarnrc in it that sets the `--emoji` flag.
+// we test to make sure that flag is not passed down to the workspace command,
+// but actual flags on the command line are passed.
+test.concurrent('should not pass yarnrc flags to workspace command', async () => {
+  const stdout = await execCommand('workspace', ['workspace-1', 'run', 'check', '--x'], 'run-workspace', true);
+  const params = stdout.find(x => x && x.indexOf('--x') >= 0);
+  expect(params).not.toMatch(/emoji/);
 });

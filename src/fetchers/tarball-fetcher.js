@@ -17,6 +17,8 @@ const stream = require('stream');
 const gunzip = require('gunzip-maybe');
 const invariant = require('invariant');
 
+const RE_URL_NAME_MATCH = /\/(?:(@[^/]+)\/)?[^/]+\/-\/(?:@[^/]+\/)?([^/]+)$/;
+
 export default class TarballFetcher extends BaseFetcher {
   async setupMirrorFromCache(): Promise<?string> {
     const tarballMirrorPath = this.getTarballMirrorPath();
@@ -44,13 +46,16 @@ export default class TarballFetcher extends BaseFetcher {
       return null;
     }
 
-    // handle scoped packages
-    const pathParts = pathname.replace(/^\//, '').split(/\//g);
+    const match = pathname.match(RE_URL_NAME_MATCH);
 
-    const packageFilename =
-      pathParts.length >= 2 && pathParts[0][0] === '@'
-        ? `${pathParts[0]}-${pathParts[pathParts.length - 1]}` // scopped
-        : `${pathParts[pathParts.length - 1]}`;
+    let packageFilename;
+    if (match) {
+      const [, scope, tarballBasename] = match;
+      packageFilename = scope ? `${scope}-${tarballBasename}` : tarballBasename;
+    } else {
+      // fallback to base name
+      packageFilename = path.basename(pathname);
+    }
 
     return this.config.getOfflineMirrorPath(packageFilename);
   }
@@ -72,52 +77,64 @@ export default class TarballFetcher extends BaseFetcher {
       chown: false, // don't chown. just leave as it is
     });
 
-    extractorStream
-      .pipe(untarStream)
-      .on('error', error => {
-        error.message = `${error.message}${tarballPath ? ` (${tarballPath})` : ''}`;
-        reject(error);
-      })
-      .on('finish', () => {
-        const expectHash = this.hash;
-        const actualHash = validateStream.getHash();
+    untarStream.on('error', err => {
+      reject(new MessageError(this.config.reporter.lang('errorExtractingTarball', err.message, tarballPath)));
+    });
 
-        if (!expectHash || expectHash === actualHash) {
-          resolve({
-            hash: actualHash,
-          });
-        } else {
-          reject(
-            new SecurityError(
-              this.config.reporter.lang(
-                'fetchBadHashWithPath',
-                this.packageName,
-                this.remote.reference,
-                actualHash,
-                expectHash,
-              ),
+    extractorStream.pipe(untarStream).on('finish', async () => {
+      const expectHash = this.hash;
+      const actualHash = validateStream.getHash();
+
+      if (!expectHash || expectHash === actualHash) {
+        resolve({
+          hash: actualHash,
+        });
+      } else if (this.config.updateChecksums) {
+        // checksums differ and should be updated
+        // update hash, destination and cached package
+        const destUpdatedHash = this.dest.replace(this.hash || '', actualHash);
+        await fsUtil.unlink(destUpdatedHash);
+        await fsUtil.rename(this.dest, destUpdatedHash);
+        this.dest = this.dest.replace(this.hash || '', actualHash);
+        this.hash = actualHash;
+        resolve({
+          hash: actualHash,
+        });
+      } else {
+        reject(
+          new SecurityError(
+            this.config.reporter.lang(
+              'fetchBadHashWithPath',
+              this.packageName,
+              this.remote.reference,
+              actualHash,
+              expectHash,
             ),
-          );
-        }
-      });
+          ),
+        );
+      }
+    });
 
     return {validateStream, extractorStream};
   }
 
-  *getLocalPaths(override: ?string): Generator<?string, void, void> {
-    if (override) {
-      yield path.resolve(this.config.cwd, override);
-    }
-    yield this.getTarballMirrorPath();
-    yield this.getTarballCachePath();
+  getLocalPaths(override: ?string): Array<string> {
+    const paths: Array<?string> = [
+      override ? path.resolve(this.config.cwd, override) : null,
+      this.getTarballMirrorPath(),
+      this.getTarballCachePath(),
+    ];
+    // $FlowFixMe: https://github.com/facebook/flow/issues/1414
+    return paths.filter(path => path != null);
   }
 
   async fetchFromLocal(override: ?string): Promise<FetchedOverride> {
-    const {stream, triedPaths} = await fsUtil.readFirstAvailableStream(this.getLocalPaths(override));
+    const tarPaths = this.getLocalPaths(override);
+    const stream = await fsUtil.readFirstAvailableStream(tarPaths);
 
     return new Promise((resolve, reject) => {
       if (!stream) {
-        reject(new MessageError(this.reporter.lang('tarballNotInNetworkOrCache', this.reference, triedPaths)));
+        reject(new MessageError(this.reporter.lang('tarballNotInNetworkOrCache', this.reference, tarPaths)));
         return;
       }
       invariant(stream, 'stream should be available at this point');
